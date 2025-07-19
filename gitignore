@@ -1,7 +1,11 @@
+# Database file
+delivery_assistant.db
+
+# Python cache
 __pycache__/
 *.pyc
-venv/
-.env
-*.log
-.DS_Store
 
+# Virtual environment folders
+venv/
+env/
+.venv/

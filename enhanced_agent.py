@@ -91,12 +91,12 @@ class DatabaseManager:
             
             # Sample orders
             sample_orders = [
-                (1023, "John Doe", "Margherita Pizza, Garlic Bread", "in_transit", 
-                 (datetime.now() + timedelta(minutes=15)).isoformat(), "Mario's Pizza", "123 Main St", "555-0123", 24.99),
-                (2042, "Jane Smith", "Cheeseburger, Fries, Coke", "preparing", 
-                 (datetime.now() + timedelta(minutes=25)).isoformat(), "Burger Palace", "456 Oak Ave", "555-0456", 18.50),
-                (3051, "Bob Johnson", "Chicken Alfredo, Caesar Salad", "delivered", 
-                 (datetime.now() - timedelta(minutes=30)).isoformat(), "Pasta House", "789 Pine Rd", "555-0789", 22.75),
+                (1023, "John Doe", "Margherita Pizza", "in_transit", 
+                 (datetime.now() + timedelta(minutes=15)).isoformat(), "Mario's Pizza", "123 Main St, Totowa", "555-0123", 18.99),
+                (2042, "Jane Smith", "Cheeseburger, Fries", "preparing", 
+                 (datetime.now() + timedelta(minutes=25)).isoformat(), "Burger Palace", "456 Oak Ave, Totowa", "555-0456", 16.98),
+                (3051, "Bob Johnson", "Chicken Alfredo", "delivered", 
+                 (datetime.now() - timedelta(minutes=30)).isoformat(), "Pasta House", "789 Pine Rd, Totowa", "555-0789", 16.99),
             ]
             
             cursor.executemany('''
@@ -107,10 +107,13 @@ class DatabaseManager:
             
             # Sample menu items
             sample_menu = [
-                ("Margherita Pizza", "Pizza", 18.99, "Classic tomato sauce, mozzarella, basil", "Garlic Bread, Caesar Salad, Red Wine"),
-                ("Cheeseburger", "Burger", 12.99, "Beef patty, cheese, lettuce, tomato", "Fries, Onion Rings, Milkshake"),
-                ("Chicken Alfredo", "Pasta", 16.99, "Grilled chicken, creamy alfredo sauce", "Garlic Bread, House Salad, White Wine"),
-                ("Caesar Salad", "Salad", 8.99, "Romaine lettuce, croutons, parmesan", "Soup, Breadsticks, Iced Tea"),
+                ("Margherita Pizza", "Pizza", 18.99, "Classic tomato sauce, mozzarella, basil", "Garlic Bread, Diet Coke, Red Wine"),
+                ("Cheeseburger", "Burger", 12.99, "Beef patty, cheese, lettuce, tomato", "Onion Rings, Milkshake, Extra Fries"),
+                ("Chicken Alfredo", "Pasta", 16.99, "Grilled chicken, creamy alfredo sauce", "House Salad, White Wine, Breadsticks"),
+                ("Caesar Salad", "Salad", 8.99, "Romaine lettuce, croutons, parmesan", "Soup, Iced Tea"),
+                ("Garlic Bread", "Side", 5.99, "Toasted bread with garlic butter", "Marinara Sauce"),
+                ("Fries", "Side", 3.99, "Crispy golden fries", "Ketchup"),
+                ("Diet Coke", "Drink", 2.50, "A refreshing diet soda", "N/A"),
             ]
             
             cursor.executemany('''
@@ -126,331 +129,179 @@ class DatabaseManager:
                 conn.close()
 
 class EnhancedDeliveryAssistant:
-    """Enhanced delivery assistant with database integration and improved functionality"""
+    """An owner-oriented assistant for managing restaurant orders."""
     
     def __init__(self):
         self.db = DatabaseManager()
-        # Initialize Ollama model, ensure it's running
         self.llm = Ollama(model="mistral")
         self.memory = ConversationBufferMemory(memory_key="chat_history", return_messages=True)
         self.agent = self._create_agent()
     
+    # MODIFIED: This tool now proactively suggests upsells.
     def track_order(self, order_id: str) -> str:
-        """Enhanced order tracking with real database lookup"""
+        """Tracks an order and suggests potential upsells based on the items."""
         try:
-            order_id = int(order_id)
+            order_id_int = int(order_id)
             conn = sqlite3.connect(self.db.db_path)
             cursor = conn.cursor()
             
-            cursor.execute('''
-                SELECT order_id, customer_name, items, status, estimated_delivery, 
-                       restaurant_name, delivery_address 
-                FROM orders WHERE order_id = ?
-            ''', (order_id,))
+            cursor.execute('SELECT items, status FROM orders WHERE order_id = ?', (order_id_int,))
+            order_result = cursor.fetchone()
             
-            result = cursor.fetchone()
+            if not order_result:
+                conn.close()
+                return f"❌ Order #{order_id} not found. Please check the order ID."
+            
+            items_str, status = order_result
+            status_msg = status.replace('_', ' ')
+            
+            # Find pairings for the first item in the order
+            first_item = items_str.split(',')[0].strip()
+            cursor.execute('SELECT recommended_pairings FROM menu_items WHERE name = ?', (first_item,))
+            pairings_result = cursor.fetchone()
             conn.close()
             
-            if not result:
-                return f"❌ Order #{order_id} not found. Please check your order ID."
+            response = f"Order #{order_id} is currently **{status_msg}**. The customer ordered: **{items_str}**."
             
-            order_id, customer_name, items, status, est_delivery_str, restaurant, address = result
+            if pairings_result and pairings_result[0]:
+                response += f"\n\n📈 **Upsell Opportunity**: You could recommend adding one of the following: **{pairings_result[0]}**. \nTo add an item, ask me to 'add [item name] to order #{order_id}'."
+            else:
+                response += "\n\nNo specific pairings found for the items in this order."
             
-            status_messages = {
-                "preparing": "🍳 Your order is being prepared",
-                "in_transit": "🚚 Your order is on the way",
-                "delivered": "✅ Your order has been delivered",
-                "cancelled": "❌ Your order was cancelled"
-            }
-            
-            est_time = None
-            if est_delivery_str:
-                try:
-                    est_time = datetime.fromisoformat(est_delivery_str)
-                except ValueError:
-                    logger.warning(f"Could not parse estimated_delivery: {est_delivery_str}")
-                    # Handle cases where format might be different, e.g., if stored as a simple string
-                    pass
-
-            time_msg = ""
-            if est_time and status != "delivered":
-                time_remaining = est_time - datetime.now()
-                if time_remaining.total_seconds() > 0:
-                    minutes = int(time_remaining.total_seconds() / 60)
-                    time_msg = f" - ETA: {minutes} minutes"
-                else:
-                    time_msg = " - Should arrive any moment!"
-            
-            return f"""📦 Order #{order_id} Status Update:
-{status_messages.get(status, status).title()}{time_msg}
-🏪 Restaurant: {restaurant}
-📍 Delivery to: {address}
-🍽️ Items: {items}"""
+            return response
             
         except ValueError:
             return "❌ Please provide a valid order ID number."
-        except sqlite3.Error as e:
-            logger.error(f"Database error tracking order {order_id}: {e}")
-            return "❌ Sorry, there was a database error tracking your order. Please try again."
         except Exception as e:
-            logger.error(f"Unexpected error tracking order {order_id}: {e}")
-            return "❌ Sorry, I couldn't track your order right now due to an unexpected issue. Please try again."
+            logger.error(f"Error in track_order: {e}")
+            return "❌ An unexpected error occurred while tracking the order."
+
+    # NEW: Tool to update an order with a new item.
+    def update_order_with_recommendation(self, order_id: str, item_to_add: str) -> str:
+        """Adds a recommended item to an existing order and updates the total."""
+        try:
+            order_id_int = int(order_id)
+            item_name = item_to_add.strip()
+            
+            conn = sqlite3.connect(self.db.db_path)
+            cursor = conn.cursor()
+            
+            # Get the new item's price
+            cursor.execute('SELECT price FROM menu_items WHERE name LIKE ?', (f'%{item_name}%',))
+            item_result = cursor.fetchone()
+            if not item_result:
+                conn.close()
+                return f"❌ Item '{item_name}' not found in the menu."
+            item_price = item_result[0]
+            
+            # Get the current order details
+            cursor.execute('SELECT items, order_total FROM orders WHERE order_id = ?', (order_id_int,))
+            order_result = cursor.fetchone()
+            if not order_result:
+                conn.close()
+                return f"❌ Order #{order_id_int} not found."
+            current_items, current_total = order_result
+            
+            # Update the order
+            new_items = f"{current_items}, {item_name}"
+            new_total = current_total + item_price
+            cursor.execute('UPDATE orders SET items = ?, order_total = ? WHERE order_id = ?', (new_items, new_total, order_id_int))
+            conn.commit()
+            conn.close()
+            
+            return f"✅ Success! I have added **{item_name}** to order #{order_id_int}. The new total is **${new_total:.2f}**. The customer has been notified."
+            
+        except ValueError:
+            return "❌ Please provide a valid order ID."
+        except Exception as e:
+            logger.error(f"Error in update_order: {e}")
+            return "❌ An unexpected error occurred while updating the order."
     
     def cancel_order(self, order_id: str = None) -> str:
-        """Enhanced order cancellation with database updates"""
+        """Cancels an entire order."""
         if not order_id:
-            return "⚠️ I need an order ID to cancel your order. Please provide your order number."
-        
+            return "⚠️ I need an order ID to cancel an order."
         try:
             order_id = int(order_id)
             conn = sqlite3.connect(self.db.db_path)
             cursor = conn.cursor()
-            
-            # Check if order exists and its current status
-            cursor.execute('SELECT status, customer_name, order_total FROM orders WHERE order_id = ?', (order_id,))
+            cursor.execute('SELECT status FROM orders WHERE order_id = ?', (order_id,))
             result = cursor.fetchone()
-            
             if not result:
                 conn.close()
-                return f"❌ Order #{order_id} not found. Please check your order ID."
-            
-            status, customer_name, order_total = result
-            
-            if status == "delivered":
+                return f"❌ Order #{order_id} not found."
+            if result[0] in ["delivered", "cancelled"]:
                 conn.close()
-                return f"❌ Order #{order_id} has already been delivered and cannot be cancelled."
+                return f"❌ Order #{order_id} cannot be cancelled as it is already {result[0]}."
             
-            if status == "cancelled":
-                conn.close()
-                return f"ℹ️ Order #{order_id} was already cancelled."
-            
-            # Update order status to cancelled
             cursor.execute('UPDATE orders SET status = ? WHERE order_id = ?', ("cancelled", order_id))
             conn.commit()
             conn.close()
-            
-            return f"""✅ Order #{order_id} has been successfully cancelled!
-💰 Refund of ${order_total:.2f} will be processed within 3-5 business days.
-📧 You'll receive a confirmation email shortly."""
-            
+            return f"✅ Order #{order_id} has been successfully cancelled."
         except ValueError:
             return "❌ Please provide a valid order ID number."
-        except sqlite3.Error as e:
-            logger.error(f"Database error cancelling order {order_id}: {e}")
-            return "❌ Sorry, there was a database error cancelling your order. Please try again."
         except Exception as e:
-            logger.error(f"Unexpected error cancelling order {order_id}: {e}")
-            return "❌ Sorry, I couldn't cancel your order right now due to an unexpected issue. Please try again."
-    
-    def get_menu_recommendation(self, food_item: str) -> str:
-        """Enhanced menu recommendations using database"""
-        conn = None
-        try:
-            conn = sqlite3.connect(self.db.db_path)
-            cursor = conn.cursor()
-            
-            # Search for the food item in the database
-            # Using UNION ALL to search in both name and description, prioritizing name matches implicitly
-            cursor.execute('''
-                SELECT name, price, description, recommended_pairings 
-                FROM menu_items 
-                WHERE name LIKE ? 
-                UNION ALL 
-                SELECT name, price, description, recommended_pairings 
-                FROM menu_items 
-                WHERE description LIKE ? AND name NOT LIKE ?
-                LIMIT 1
-            ''', (f"%{food_item}%", f"%{food_item}%", f"%{food_item}%"))
-            
-            result = cursor.fetchone() # Fetch just one result
-            
-            if result:
-                name, price, description, pairings = result
-                return f"""🍽️ {name} (${price:.2f})
-📝 {description}
-🤝 Great pairings: {pairings}"""
-            else:
-                # Fallback to original logic if no database match
-                food_item_lower = food_item.lower()
-                if "burger" in food_item_lower:
-                    return "🍔 For a burger, we recommend a side of curly fries and a cold soda or milkshake!"
-                elif "pizza" in food_item_lower:
-                    return "🍕 Pizza goes great with garlic knots and sparkling water or a nice red wine!"
-                elif "pasta" in food_item_lower:
-                    return "🍝 Try a house salad and a glass of white wine with pasta dishes!"
-                else:
-                    return f"🍽️ For {food_item}, we suggest asking our chef for the perfect drink pairing!"
-                    
-        except sqlite3.Error as e:
-            logger.error(f"Database error getting menu recommendation for '{food_item}': {e}")
-            return "❌ Sorry, there was a database error getting recommendations. Please try again."
-        except Exception as e:
-            logger.error(f"Unexpected error getting menu recommendation for '{food_item}': {e}")
-            return "❌ Sorry, I couldn't get recommendations right now due to an unexpected issue. Please try again."
-        finally:
-            if conn:
-                conn.close()
-    
+            logger.error(f"Error in cancel_order: {e}")
+            return "❌ An unexpected error occurred while cancelling the order."
+
     def get_order_history(self, customer_name: str) -> str:
-        """Get order history for a customer"""
-        conn = None
-        try:
-            conn = sqlite3.connect(self.db.db_path)
-            cursor = conn.cursor()
-            
-            cursor.execute('''
-                SELECT order_id, items, status, order_total, created_at
-                FROM orders WHERE customer_name LIKE ?
-                ORDER BY created_at DESC LIMIT 5
-            ''', (f"%{customer_name}%",))
-            
-            results = cursor.fetchall()
-            conn.close()
-            
-            if not results:
-                return f"❌ No orders found for {customer_name}."
-            
-            history = f"📋 Order History for {customer_name}:\n"
-            for order_id, items, status, total, created in results:
-                try:
-                    created_date = datetime.fromisoformat(created).strftime("%Y-%m-%d %H:%M")
-                except ValueError:
-                    created_date = created # Fallback if not isoformat
-                history += f"\n🔸 Order #{order_id} ({created_date})\n   Items: {items}\n   Status: {status.title()}\n   Total: ${total:.2f}\n"
-            
-            return history
-            
-        except sqlite3.Error as e:
-            logger.error(f"Database error getting order history for '{customer_name}': {e}")
-            return "❌ Sorry, there was a database error retrieving order history. Please try again."
-        except Exception as e:
-            logger.error(f"Unexpected error getting order history for '{customer_name}': {e}")
-            return "❌ Sorry, I couldn't retrieve order history right now due to an unexpected issue."
-        finally:
-            if conn:
-                conn.close()
-    
-    def submit_feedback(self, order_id: str, rating: str, comments: str = "") -> str:
-        """Submit feedback for an order"""
-        conn = None
-        try:
-            order_id_int = int(order_id)
-            rating_int = int(rating)
-            
-            if rating_int < 1 or rating_int > 5:
-                return "❌ Please provide a rating between 1 and 5 stars."
-            
-            conn = sqlite3.connect(self.db.db_path)
-            cursor = conn.cursor()
-            
-            # Check if order exists
-            cursor.execute('SELECT order_id FROM orders WHERE order_id = ?', (order_id_int,))
-            if not cursor.fetchone():
-                conn.close()
-                return f"❌ Order #{order_id_int} not found."
-            
-            # Insert feedback
-            cursor.execute('''
-                INSERT INTO feedback (order_id, rating, comments)
-                VALUES (?, ?, ?)
-            ''', (order_id_int, rating_int, comments))
-            
-            conn.commit()
-            conn.close()
-            
-            stars = "⭐" * rating_int
-            return f"✅ Thank you for your feedback!\n{stars} ({rating_int}/5)\nOrder #{order_id_int}: {comments}"
-            
-        except ValueError:
-            return "❌ Please provide valid order ID and rating (1-5)."
-        except sqlite3.Error as e:
-            logger.error(f"Database error submitting feedback for order {order_id}: {e}")
-            return "❌ Sorry, there was a database error submitting your feedback. Please try again."
-        except Exception as e:
-            logger.error(f"Unexpected error submitting feedback for order {order_id}: {e}")
-            return "❌ Sorry, I couldn't submit your feedback right now due to an unexpected issue."
-        finally:
-            if conn:
-                conn.close()
-    
-    def get_restaurant_info(self, restaurant_name: str) -> str:
-        """Get information about restaurants"""
-        conn = None
-        try:
-            conn = sqlite3.connect(self.db.db_path)
-            cursor = conn.cursor()
-            
-            cursor.execute('''
-                SELECT DISTINCT restaurant_name, COUNT(*) as order_count
-                FROM orders WHERE restaurant_name LIKE ?
-                GROUP BY restaurant_name
-            ''', (f"%{restaurant_name}%",))
-            
-            results = cursor.fetchall()
-            conn.close()
-            
-            if not results:
-                return f"❌ No information found for '{restaurant_name}'."
-            
-            info = "🏪 Restaurant Information:\n"
-            for restaurant, count in results:
-                info += f"\n📍 {restaurant}\n🛍️ Total orders: {count}\n"
-            
-            return info
-            
-        except sqlite3.Error as e:
-            logger.error(f"Database error getting restaurant info for '{restaurant_name}': {e}")
-            return "❌ Sorry, there was a database error retrieving restaurant information. Please try again."
-        except Exception as e:
-            logger.error(f"Unexpected error getting restaurant info for '{restaurant_name}': {e}")
-            return "❌ Sorry, I couldn't get restaurant information right now due to an unexpected issue."
-        finally:
-            if conn:
-                conn.close()
-    
+        """Gets the order history for a specific customer."""
+        conn = sqlite3.connect(self.db.db_path)
+        cursor = conn.cursor()
+        cursor.execute('''
+            SELECT order_id, items, status, order_total, created_at
+            FROM orders WHERE customer_name LIKE ?
+            ORDER BY created_at DESC LIMIT 5
+        ''', (f"%{customer_name}%",))
+        results = cursor.fetchall()
+        conn.close()
+        if not results:
+            return f"❌ No orders found for a customer named '{customer_name}'."
+        history = f"📋 Order History for {customer_name}:\n"
+        for order_id, items, status, total, created in results:
+            created_date = datetime.fromisoformat(created).strftime("%Y-%m-%d %H:%M")
+            history += f"\n- Order #{order_id} ({created_date}): {items} - Status: {status} - Total: ${total:.2f}"
+        return history
+
     def _create_agent(self):
-        """Create the LangChain agent with enhanced tools"""
+        """Creates the LangChain agent with owner-oriented tools."""
         tools = [
             Tool(
-                name="track_order",
+                name="track_order_with_upsell_suggestions",
                 func=self.track_order,
-                description="Track the current location and ETA for a given order ID. Input should be the order ID number."
+                description="Use this to check the status of a specific order. The input must be the numerical order ID. This tool also provides upsell recommendations."
+            ),
+            # NEW Tool added to the agent
+            Tool(
+                name="update_order_with_new_item",
+                func=lambda x: self.update_order_with_recommendation(*x.split(',', 1)),
+                description="Use this to add a new item to an existing order. The input should be a string with the order ID and the item name, separated by a comma. For example: '1023,Diet Coke'."
             ),
             Tool(
                 name="cancel_order",
                 func=self.cancel_order,
-                description="Cancel an order by ID. Input should be the order ID number."
+                description="Use this to cancel an entire order. The input must be the numerical order ID."
             ),
             Tool(
-                name="get_menu_recommendation",
-                func=self.get_menu_recommendation,
-                description="Get menu recommendations and pairings for a food item. Input should be the food item name."
-            ),
-            Tool(
-                name="get_order_history",
+                name="get_customer_order_history",
                 func=self.get_order_history,
-                description="Get order history for a customer. Input should be the customer name."
+                description="Use this to get the order history for a customer. The input must be the customer's name."
             ),
-            Tool(
-                name="submit_feedback",
-                # The agent will pass arguments as a single string, so split it
-                func=lambda x: self.submit_feedback(*x.split(',', 2)), 
-                description="Submit feedback for an order. Input should be 'order_id,rating,comments' (comments optional). For example: '1023,5,Great food!'"
-            ),
-            Tool(
-                name="get_restaurant_info",
-                func=self.get_restaurant_info,
-                description="Get information about a restaurant. Input should be the restaurant name."
-            )
         ]
         
+        # Define a prompt that frames the agent as an assistant for a restaurant owner
+        agent_prompt = """You are an AI assistant for a restaurant owner. Your goal is to help the owner manage orders, identify upsell opportunities, and handle customer information efficiently. When responding, be concise and professional.
+
+        You have access to the following tools:"""
+
         return initialize_agent(
             tools=tools,
             llm=self.llm,
-            agent_type="zero-shot-react-description",
+            agent="zero-shot-react-description",
             verbose=True,
             memory=self.memory,
-            handle_parsing_errors=True
+            handle_parsing_errors=True,
+            agent_kwargs={"prefix": agent_prompt}
         )
     
     def run(self, query: str) -> str:
@@ -459,25 +310,7 @@ class EnhancedDeliveryAssistant:
             return self.agent.run(query)
         except Exception as e:
             logger.error(f"Error running agent with query '{query}': {e}")
-            return "❌ Sorry, I encountered an error. Please try rephrasing your question or contact support if the issue persists."
+            return "❌ Sorry, I encountered an error. Please try rephrasing your question."
 
 # Create global instance
 enhanced_assistant = EnhancedDeliveryAssistant()
-
-# CLI mode for testing
-if __name__ == "__main__":
-    print("🚚 Enhanced AI Delivery Assistant")
-    print("Available commands:")
-    print("- Track order: 'Where is my order 1023?'")
-    print("- Cancel order: 'Cancel order 2042'")
-    print("- Get recommendations: 'What goes well with pizza?'")
-    print("- Order history: 'Show my order history for John Doe'")
-    print("- Submit feedback: 'I want to rate order 1023 as 5 stars, great food!'")
-    print("- Restaurant info: 'Tell me about Mario's Pizza'")
-    print("\nType 'exit' or 'quit' to end.\n")
-    
-    while True:
-        user_query = input("User: ")
-        if user_query.lower() in ["exit", "quit"]:
-            break
-        print("AI:", enhanced_assistant.run(user_query))
